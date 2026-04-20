@@ -27,7 +27,7 @@ jobs:
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-          WORKSPACE_BASE_PATH: /Workspace/Users/dmytro874@softserve.academy/Lab9
+          WORKSPACE_BASE_PATH: /Workspace/Users/dmytro874@softserve.academy/Lab09
           CLUSTER_NODE_TYPE: Standard_DS3_v2
           SPARK_VERSION: 13.3.x-scala2.12
         run: python automate_platform_ops.py
