@@ -13,6 +13,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def monitor_job_pro(w: WorkspaceClient, run_id: int, max_duration_seconds: int = 3600) -> bool:
+    """
+    Very patient monitor. It will wait through any temporary SDK exceptions 
+    until the job explicitly succeeds or fails.
+    """
     logger.info(f"Starting job monitor. Run ID: {run_id}. Timeout: {max_duration_seconds}s")
     
     active_states = [
@@ -33,7 +37,7 @@ def monitor_job_pro(w: WorkspaceClient, run_id: int, max_duration_seconds: int =
 
             if current_state not in active_states:
                 result = run.state.result_state
-                logger.info("Job execution terminated.")
+                logger.info(f"Job finished with state: {current_state.value}")
                 
                 if result == jobs.RunResultState.SUCCESS:
                     logger.info("Result: SUCCESS")
@@ -43,27 +47,27 @@ def monitor_job_pro(w: WorkspaceClient, run_id: int, max_duration_seconds: int =
                     return False
                     
         except Exception as e:
-            logger.warning(f"Monitoring notice (temporary issue): {str(e)}. Retrying...")
+            logger.info(f"Wait/Connection notice: {str(e)}. Retrying in 20s...")
             
         time.sleep(20) 
         
-    logger.error("Maximum wait time exceeded. Terminating monitoring loop.")
+    logger.error("Timeout: Monitoring exceeded maximum duration.")
     return False
 
 def main():
     parser = argparse.ArgumentParser(description="Databricks Pipeline Automation CLI")
-    parser.add_argument("--job-name", type=str, default="Internship_Data_Pipeline_Lab", help="Name of the Job")
-    parser.add_argument("--timeout", type=int, default=3600, help="Monitoring timeout in seconds")
+    parser.add_argument("--job-name", type=str, default="Internship_Data_Pipeline_Lab", help="Job name")
+    parser.add_argument("--timeout", type=int, default=3600, help="Timeout in seconds")
     args = parser.parse_args()
 
     load_dotenv()
-
+    
     base_path = os.getenv("WORKSPACE_BASE_PATH")
     cluster_id = os.getenv("DATABRICKS_EXISTING_CLUSTER_ID")
 
     if not base_path or not cluster_id:
-        logger.error("Environment variables WORKSPACE_BASE_PATH or DATABRICKS_EXISTING_CLUSTER_ID missing.")
-        return
+        logger.error("Missing WORKSPACE_BASE_PATH or DATABRICKS_EXISTING_CLUSTER_ID.")
+        exit(1)
 
     try:
         w = WorkspaceClient()
@@ -86,24 +90,23 @@ def main():
             notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/99_select_all")
         )
 
-        logger.info(f"Creating/Updating Job: {args.job_name}...")
+        logger.info(f"Preparing Job: {args.job_name}...")
         created_job = w.jobs.create(name=args.job_name, tasks=[task_1, task_2, task_3])
         
-        logger.info(f"Triggering Job ID: {created_job.job_id}")
         run_response = w.jobs.run_now(job_id=created_job.job_id)
-        
         run_id = run_response.run_id
-        logger.info(f"Job triggered successfully. Run ID: {run_id}")
+        logger.info(f"Job triggered. Run ID: {run_id}")
 
-        time.sleep(10)
+        logger.info("Initializing...")
+        time.sleep(15)
 
-        is_successful = monitor_job_pro(w, run_id, args.timeout)
+        success = monitor_job_pro(w, run_id, args.timeout)
         
-        if not is_successful:
-            exit(1) 
-            
+        if not success:
+            exit(1)
+
     except Exception as e:
-        logger.error(f"Critical error during job setup: {str(e)}")
+        logger.error(f"Critical error during setup: {str(e)}")
         exit(1)
 
 if __name__ == "__main__":
