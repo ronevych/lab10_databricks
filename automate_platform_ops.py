@@ -6,108 +6,85 @@ from dotenv import load_dotenv
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-def monitor_job_pro(w: WorkspaceClient, run_id: int, max_duration_seconds: int = 3600) -> bool:
+def monitor_job_pro(w, run_id, timeout):
     """
-    Very patient monitor. It will wait through any temporary SDK exceptions 
-    until the job explicitly succeeds or fails.
+    Monitor a Databricks job run until completion or timeout.
+    This function handles SDK errors gracefully and returns True if the job succeeds.
     """
-    logger.info(f"Starting job monitor. Run ID: {run_id}. Timeout: {max_duration_seconds}s")
-    
-    active_states = [
-        jobs.RunLifeCycleState.PENDING,
-        jobs.RunLifeCycleState.RUNNING,
-        jobs.RunLifeCycleState.BLOCKED,
-        jobs.RunLifeCycleState.WAITING_FOR_RESOURCES
-    ]
-
+    logger.info(f"Starting job monitor. Run ID: {run_id}")
     start_time = time.time()
+    
+    # Job states that indicate the job is still running
+    active_states = ['PENDING', 'RUNNING', 'BLOCKED', 'WAITING_FOR_RESOURCES']
 
-    while (time.time() - start_time) < max_duration_seconds:
+    while (time.time() - start_time) < timeout:
         try:
+            # Fetch the current run status from Databricks
             run = w.jobs.get_run(run_id=run_id)
-            current_state = run.state.life_cycle_state
+            # Convert status object to string for safer processing
+            state = str(run.state.life_cycle_state.value)
             
-            logger.info(f"Current status: {current_state.value}")
+            logger.info(f"Current status: {state}")
 
-            if current_state not in active_states:
-                result = run.state.result_state
-                logger.info(f"Job finished with state: {current_state.value}")
-                
-                if result == jobs.RunResultState.SUCCESS:
-                    logger.info("Result: SUCCESS")
-                    return True
-                else:
-                    logger.error(f"Result: {result.value if result else 'FAILED'}")
-                    return False
-                    
+            if state not in active_states:
+                result = str(run.state.result_state.value) if run.state.result_state else "UNKNOWN"
+                logger.info(f"Job finished. State: {state}, Result: {result}")
+                return result == 'SUCCESS'
+
         except Exception as e:
-            logger.info(f"Wait/Connection notice: {str(e)}. Retrying in 20s...")
-            
-        time.sleep(20) 
+            # Handle SDK exceptions. If it's a WAITING_FOR_RESOURCES error, we log and continue
+            err_msg = str(e)
+            if "WAITING_FOR_RESOURCES" in err_msg:
+                logger.info("Status: WAITING_FOR_RESOURCES (caught as exception, skipping...)")
+            else:
+                logger.warning(f"Polling update: {err_msg}")
         
-    logger.error("Timeout: Monitoring exceeded maximum duration.")
+        time.sleep(20)
+    
+    logger.error("Monitor timeout reached.")
     return False
 
 def main():
-    parser = argparse.ArgumentParser(description="Databricks Pipeline Automation CLI")
-    parser.add_argument("--job-name", type=str, default="Internship_Data_Pipeline_Lab", help="Job name")
-    parser.add_argument("--timeout", type=int, default=3600, help="Timeout in seconds")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--job-name", default="Internship_Pipeline_Lab10")
+    parser.add_argument("--timeout", type=int, default=3600)
     args = parser.parse_args()
-
     load_dotenv()
-    
+
+    w = WorkspaceClient()
     base_path = os.getenv("WORKSPACE_BASE_PATH")
     cluster_id = os.getenv("DATABRICKS_EXISTING_CLUSTER_ID")
 
-    if not base_path or not cluster_id:
-        logger.error("Missing WORKSPACE_BASE_PATH or DATABRICKS_EXISTING_CLUSTER_ID.")
-        exit(1)
-
+    # Stage 1: Create and trigger job
+    # We catch configuration and setup errors here
     try:
-        w = WorkspaceClient()
+        task_conf = {"existing_cluster_id": cluster_id}
         
-        task_1 = jobs.Task(
-            task_key="Step_01_Simulation",
-            existing_cluster_id=cluster_id,
-            notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/01_changes_simulation")
-        )
-        task_2 = jobs.Task(
-            task_key="Step_02_SCD_Type2",
-            existing_cluster_id=cluster_id,
-            depends_on=[jobs.TaskDependency(task_key="Step_01_Simulation")],
-            notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/03_scd_type2")
-        )
-        task_3 = jobs.Task(
-            task_key="Step_03_Select_All",
-            existing_cluster_id=cluster_id,
-            depends_on=[jobs.TaskDependency(task_key="Step_02_SCD_Type2")],
-            notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/99_select_all")
-        )
+        t1 = jobs.Task(task_key="Step_1", **task_conf, notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/01_changes_simulation"))
+        t2 = jobs.Task(task_key="Step_2", **task_conf, depends_on=[jobs.TaskDependency(task_key="Step_1")], notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/03_scd_type2"))
+        t3 = jobs.Task(task_key="Step_3", **task_conf, depends_on=[jobs.TaskDependency(task_key="Step_2")], notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/99_select_all"))
 
-        logger.info(f"Preparing Job: {args.job_name}...")
-        created_job = w.jobs.create(name=args.job_name, tasks=[task_1, task_2, task_3])
-        
-        run_response = w.jobs.run_now(job_id=created_job.job_id)
-        run_id = run_response.run_id
+        logger.info("Preparing Job...")
+        job = w.jobs.create(name=args.job_name, tasks=[t1, t2, t3])
+        run_id = w.jobs.run_now(job_id=job.job_id).run_id
         logger.info(f"Job triggered. Run ID: {run_id}")
-
-        logger.info("Initializing...")
-        time.sleep(15)
-
-        success = monitor_job_pro(w, run_id, args.timeout)
         
-        if not success:
-            exit(1)
-
     except Exception as e:
-        logger.error(f"Critical error during setup: {str(e)}")
+        logger.error(f"Failed to setup or trigger job: {e}")
         exit(1)
+    # Stage 2: Monitor job progress
+    # The monitoring function is separate so errors during monitoring do not crash the main process
+    time.sleep(10)
+    success = monitor_job_pro(w, run_id, args.timeout)
+    
+    if not success:
+        logger.error("Pipeline failed or timed out.")
+        exit(1)
+    
+    logger.info("Pipeline finished successfully!")
 
 if __name__ == "__main__":
     main()
