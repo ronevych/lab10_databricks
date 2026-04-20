@@ -111,18 +111,41 @@ def main():
         )
         logger.info(f"Job created successfully. Job ID: {created_job.job_id}")
 
-        run_now_response = w.jobs.run_now(job_id=created_job.job_id).result()
-        logger.info(f"Job triggered. Run ID: {run_now_response.run_id}")
+        # 1. Trigger the job without .result()
+        run_handle = w.jobs.run_now(job_id=created_job.job_id)
+        
+        # 2. Extract run_id safely
+        run_id = getattr(run_handle, 'run_id', None)
+        if not run_id and hasattr(run_handle, 'response'):
+            run_id = run_handle.response.run_id
 
-        # Start monitoring
-        is_successful = monitor_job_pro(w, run_now_response.run_id, args.timeout)
+        logger.info(f"Job triggered. Run ID: {run_id}")
+
+        # 3. Wait 10 seconds for Databricks to stabilize the run state
+        logger.info("Waiting 10 seconds for initialization...")
+        time.sleep(10)
+
+        # 4. Start monitoring
+        is_successful = monitor_job_pro(w, run_id, args.timeout)
         
         if not is_successful:
             exit(1)
             
     except Exception as e:
-        logger.error(f"Failed to create or execute job. Error: {str(e)}")
-        exit(1)
+        error_msg = str(e)
+        # If the "error" is actually just a starting state, don't crash
+        if "WAITING_FOR_RESOURCES" in error_msg or "PENDING" in error_msg:
+            logger.warning(f"Note: SDK reported initial state as an exception: {error_msg}")
+            logger.info("Proceeding to monitor anyway...")
+            # We already have the run_id from the handle above, so we can try to monitor
+            try:
+                monitor_job_pro(w, run_id, args.timeout)
+            except:
+                logger.error("Could not recover run_id for monitoring.")
+                exit(1)
+        else:
+            logger.error(f"Critical error: {error_msg}")
+            exit(1)
 
 if __name__ == "__main__":
     main()
