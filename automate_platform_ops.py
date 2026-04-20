@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs
 
-# Initialize logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -14,9 +13,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def monitor_job_pro(w: WorkspaceClient, run_id: int, max_duration_seconds: int = 3600) -> bool:
-    """
-    Monitors the Databricks job run until completion or timeout.
-    """
     logger.info(f"Starting job monitor. Run ID: {run_id}. Timeout: {max_duration_seconds}s")
     
     active_states = [
@@ -43,109 +39,72 @@ def monitor_job_pro(w: WorkspaceClient, run_id: int, max_duration_seconds: int =
                     logger.info("Result: SUCCESS")
                     return True
                 else:
-                    logger.error(f"Result: {result.value if result else 'UNKNOWN_ERROR'}")
+                    logger.error(f"Result: {result.value if result else 'FAILED'}")
                     return False
                     
         except Exception as e:
-            logger.warning(f"API connection error: {str(e)}. Retrying in 15 seconds...")
+            logger.warning(f"Monitoring notice (temporary issue): {str(e)}. Retrying...")
             
-        time.sleep(15)
+        time.sleep(20) 
         
     logger.error("Maximum wait time exceeded. Terminating monitoring loop.")
     return False
 
 def main():
     parser = argparse.ArgumentParser(description="Databricks Pipeline Automation CLI")
-    parser.add_argument("--job-name", type=str, default="Internship_Data_Pipeline_Lab", help="Name of the Databricks Job to create")
+    parser.add_argument("--job-name", type=str, default="Internship_Data_Pipeline_Lab", help="Name of the Job")
     parser.add_argument("--timeout", type=int, default=3600, help="Monitoring timeout in seconds")
     args = parser.parse_args()
 
     load_dotenv()
 
-    # Get credentials and paths from environment variables
     base_path = os.getenv("WORKSPACE_BASE_PATH")
     cluster_id = os.getenv("DATABRICKS_EXISTING_CLUSTER_ID")
 
-    # Validate required environment variables
-    if not base_path:
-        logger.error("WORKSPACE_BASE_PATH is missing in environment variables.")
-        return
-    if not cluster_id:
-        logger.error("DATABRICKS_EXISTING_CLUSTER_ID is missing in environment variables.")
+    if not base_path or not cluster_id:
+        logger.error("Environment variables WORKSPACE_BASE_PATH or DATABRICKS_EXISTING_CLUSTER_ID missing.")
         return
 
     try:
         w = WorkspaceClient()
-    except Exception as e:
-        logger.error(f"Failed to initialize WorkspaceClient. Error: {str(e)}")
-        return
-
-    logger.info(f"Using existing cluster ID: {cluster_id}")
-
-    # Define tasks using the existing cluster to ensure Unity Catalog compatibility
-    task_1 = jobs.Task(
-        task_key="Step_01_Simulation",
-        existing_cluster_id=cluster_id,
-        notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/01_changes_simulation")
-    )
-
-    task_2 = jobs.Task(
-        task_key="Step_02_SCD_Type2",
-        existing_cluster_id=cluster_id,
-        depends_on=[jobs.TaskDependency(task_key="Step_01_Simulation")],
-        notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/03_scd_type2")
-    )
-
-    task_3 = jobs.Task(
-        task_key="Step_03_Select_All",
-        existing_cluster_id=cluster_id,
-        depends_on=[jobs.TaskDependency(task_key="Step_02_SCD_Type2")],
-        notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/99_select_all")
-    )
-
-    logger.info(f"Creating Job: {args.job_name}...")
-    try:
-        created_job = w.jobs.create(
-            name=args.job_name,
-            tasks=[task_1, task_2, task_3]
-        )
-        logger.info(f"Job created successfully. Job ID: {created_job.job_id}")
-
-        # 1. Trigger the job without .result()
-        run_handle = w.jobs.run_now(job_id=created_job.job_id)
         
-        # 2. Extract run_id safely
-        run_id = getattr(run_handle, 'run_id', None)
-        if not run_id and hasattr(run_handle, 'response'):
-            run_id = run_handle.response.run_id
+        task_1 = jobs.Task(
+            task_key="Step_01_Simulation",
+            existing_cluster_id=cluster_id,
+            notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/01_changes_simulation")
+        )
+        task_2 = jobs.Task(
+            task_key="Step_02_SCD_Type2",
+            existing_cluster_id=cluster_id,
+            depends_on=[jobs.TaskDependency(task_key="Step_01_Simulation")],
+            notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/03_scd_type2")
+        )
+        task_3 = jobs.Task(
+            task_key="Step_03_Select_All",
+            existing_cluster_id=cluster_id,
+            depends_on=[jobs.TaskDependency(task_key="Step_02_SCD_Type2")],
+            notebook_task=jobs.NotebookTask(notebook_path=f"{base_path}/99_select_all")
+        )
 
-        logger.info(f"Job triggered. Run ID: {run_id}")
+        logger.info(f"Creating/Updating Job: {args.job_name}...")
+        created_job = w.jobs.create(name=args.job_name, tasks=[task_1, task_2, task_3])
+        
+        logger.info(f"Triggering Job ID: {created_job.job_id}")
+        run_response = w.jobs.run_now(job_id=created_job.job_id)
+        
+        run_id = run_response.run_id
+        logger.info(f"Job triggered successfully. Run ID: {run_id}")
 
-        # 3. Wait 10 seconds for Databricks to stabilize the run state
-        logger.info("Waiting 10 seconds for initialization...")
         time.sleep(10)
 
-        # 4. Start monitoring
         is_successful = monitor_job_pro(w, run_id, args.timeout)
         
         if not is_successful:
-            exit(1)
+            exit(1) 
             
     except Exception as e:
-        error_msg = str(e)
-        # If the "error" is actually just a starting state, don't crash
-        if "WAITING_FOR_RESOURCES" in error_msg or "PENDING" in error_msg:
-            logger.warning(f"Note: SDK reported initial state as an exception: {error_msg}")
-            logger.info("Proceeding to monitor anyway...")
-            # We already have the run_id from the handle above, so we can try to monitor
-            try:
-                monitor_job_pro(w, run_id, args.timeout)
-            except:
-                logger.error("Could not recover run_id for monitoring.")
-                exit(1)
-        else:
-            logger.error(f"Critical error: {error_msg}")
-            exit(1)
+        logger.error(f"Critical error during job setup: {str(e)}")
+        exit(1)
 
 if __name__ == "__main__":
     main()
