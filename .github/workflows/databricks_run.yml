@@ -3,6 +3,8 @@ name: Databricks Automation CI
 on:
   push:
     branches: 
+      - main
+      - test
 
 jobs:
   run-databricks-pipeline:
@@ -10,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 
         with:
           python-version: '3.10'
 
@@ -25,4 +27,7 @@ jobs:
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          WORKSPACE_BASE_PATH: /Workspace/Users/dmytro874@softserve.academy/Lab9
+          CLUSTER_NODE_TYPE: Standard_DS3_v2
+          SPARK_VERSION: 13.3.x-scala2.12
         run: python automate_platform_ops.py
